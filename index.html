@@ -1,0 +1,224 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>THE SCHOOL: ULTIMATE</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: monospace; touch-action: none; }
+        canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+        .ui { position: absolute; z-index: 10; pointer-events: none; width: 100%; padding: 15px; color: #0f0; }
+        #battery-ui { display: inline-block; width: 60px; height: 10px; border: 1px solid #0f0; }
+        #battery-level { height: 100%; background: #0f0; width: 100%; }
+        .overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #000; z-index: 20; text-align: center; color: #0f0; }
+        .hidden { display: none !important; }
+        button { background: transparent; color: #0f0; border: 1px solid #0f0; padding: 15px 30px; font-size: 1.2rem; cursor: pointer; pointer-events: auto; }
+        #move-zone { position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px; background: rgba(0,255,0,0.1); border-radius: 50%; z-index: 5; pointer-events: auto; }
+        #stick { position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; background: #0f0; border-radius: 50%; transform: translate(-50%, -50%); opacity: 0.3; }
+        #look-zone { position: absolute; top: 0; right: 0; width: 60%; height: 100%; z-index: 4; pointer-events: auto; }
+        .btns { position: absolute; bottom: 30px; right: 30px; display: flex; gap: 15px; z-index: 5; pointer-events: auto; }
+        .action-btn { width: 70px; height: 70px; background: rgba(0,0,0,0.5); border: 1px solid #0f0; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 30px; }
+    </style>
+</head>
+<body>
+
+<div id="hud" class="ui">
+    FILES: <span id="notes-val">0/6</span> | PWR: <div id="battery-ui"><div id="battery-level"></div></div>
+</div>
+
+<div id="menu" class="overlay">
+    <h1 style="letter-spacing: 5px;">THE_SCHOOL</h1>
+    <p>СОБЕРИ 6 ФАЙЛОВ 📗</p>
+    <button onclick="start()">INIT_SYSTEM</button>
+</div>
+
+<div id="death" class="overlay hidden">
+    <h1 style="color: red; font-size: 5rem;">👹</h1>
+    <p>СИГНАЛ ПОТЕРЯН</p>
+    <button onclick="location.reload()">REBOOT</button>
+</div>
+
+<div id="move-zone"><div id="stick"></div></div>
+<div id="look-zone"></div>
+<div class="btns">
+    <div class="action-btn" onclick="toggleFlash()">🔦</div>
+    <div class="action-btn" onclick="interact()">🖐️</div>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const SIZE = 10;
+const map = [
+    1,1,1,1,1,1,1,1,1,1,
+    1,0,0,0,1,0,0,0,0,1,
+    1,0,1,0,0,0,1,1,0,1,
+    1,0,1,1,1,0,0,0,0,1,
+    1,0,0,0,1,0,1,1,0,1,
+    1,1,1,0,0,0,0,1,0,1,
+    1,0,0,0,1,1,0,0,0,1,
+    1,0,1,0,0,1,0,1,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,1,1,1,1,1,1,1,1,1
+];
+
+const state = {
+    p: { x: 1.5, y: 1.5, dir: 0, v: 0 },
+    enemy: { x: 8.5, y: 8.5, active: false, speed: 0.007 },
+    notes: [], collected: 0, flash: true, battery: 100, running: false,
+    zBuf: [], panic: 0
+};
+
+// --- AUDIO ---
+const AudioEngine = {
+    ctx: null, nextNoteTime: 0, currentNote: 0,
+    seq: [110, 123, 130, 146, 110, 123, 164, 146],
+    init() {
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.scheduler();
+    },
+    playNote(freq, time, dur) {
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = state.panic > 0.5 ? 'sawtooth' : 'square';
+        osc.frequency.setValueAtTime(freq, time);
+        g.gain.setValueAtTime(0.05, time);
+        g.gain.exponentialRampToValueAtTime(0.001, time + dur);
+        osc.connect(g); g.connect(this.ctx.destination);
+        osc.start(time); osc.stop(time + dur);
+    },
+    scheduler() {
+        while (this.nextNoteTime < this.ctx.currentTime + 0.1) {
+            let tempo = 100 + (state.panic * 150);
+            let bps = 60.0 / tempo;
+            this.playNote(this.seq[this.currentNote], this.nextNoteTime, bps * 0.9);
+            this.nextNoteTime += 0.25 * bps;
+            this.currentNote = (this.currentNote + 1) % this.seq.length;
+        }
+        setTimeout(() => this.scheduler(), 25);
+    }
+};
+
+// --- CONTROLS ---
+let lastX = null;
+document.getElementById('look-zone').addEventListener('touchstart', e => { lastX = e.touches[0].clientX; });
+document.getElementById('look-zone').addEventListener('touchmove', e => {
+    if(lastX !== null) {
+        state.p.dir -= (e.touches[0].clientX - lastX) * 0.007;
+        lastX = e.touches[0].clientX;
+    }
+});
+document.getElementById('look-zone').addEventListener('touchend', () => { lastX = null; });
+
+const moveZone = document.getElementById('move-zone');
+moveZone.addEventListener('touchmove', e => {
+    let r = moveZone.getBoundingClientRect();
+    let dx = e.touches[0].clientX - (r.left + 60), dy = e.touches[0].clientY - (r.top + 60);
+    let d = Math.min(50, Math.sqrt(dx*dx + dy*dy));
+    let a = Math.atan2(dy, dx);
+    document.getElementById('stick').style.transform = `translate(calc(-50% + ${Math.cos(a)*d}px), calc(-50% + ${Math.sin(a)*d}px))`;
+    state.p.v = -Math.sin(a) * (d/50) * 0.06;
+});
+moveZone.addEventListener('touchend', () => {
+    document.getElementById('stick').style.transform = `translate(-50%,-50%)`;
+    state.p.v = 0;
+});
+
+function toggleFlash() { if(state.battery > 0) state.flash = !state.flash; }
+function interact() {
+    state.notes.forEach((n, i) => {
+        if(Math.sqrt((n.x-state.p.x)**2 + (n.y-state.p.y)**2) < 1.2) {
+            state.notes.splice(i, 1);
+            state.collected++;
+            state.enemy.active = true;
+            state.enemy.speed += 0.003;
+            document.getElementById('notes-val').innerText = state.collected + "/6";
+        }
+    });
+}
+
+function start() {
+    document.getElementById('menu').classList.add('hidden');
+    canvas.width = 480; canvas.height = 270;
+    AudioEngine.init();
+    while(state.notes.length < 6) {
+        let rx = Math.floor(Math.random()*SIZE), ry = Math.floor(Math.random()*SIZE);
+        if(map[ry*SIZE+rx] === 0 && (rx > 3 || ry > 3)) state.notes.push({x:rx+0.5, y:ry+0.5});
+    }
+    state.running = true;
+    requestAnimationFrame(loop);
+}
+
+function loop() {
+    if(!state.running) return;
+
+    let nx = state.p.x + Math.sin(state.p.dir) * state.p.v;
+    let ny = state.p.y + Math.cos(state.p.dir) * state.p.v;
+    if(map[Math.floor(ny)*SIZE + Math.floor(nx)] === 0) { state.p.x = nx; state.p.y = ny; }
+
+    if(state.flash) {
+        state.battery -= 0.04;
+        if(state.battery <= 0) { state.battery = 0; state.flash = false; }
+    }
+    document.getElementById('battery-level').style.width = state.battery + '%';
+
+    if(state.enemy.active) {
+        let edx = state.p.x - state.enemy.x, edy = state.p.y - state.enemy.y;
+        let d = Math.sqrt(edx*edx + edy*edy);
+        state.panic = Math.max(0, 1 - (d/6));
+        let mx = (edx/d) * state.enemy.speed, my = (edy/d) * state.enemy.speed;
+        if(map[Math.floor(state.enemy.y)*SIZE + Math.floor(state.enemy.x + mx)] === 0) state.enemy.x += mx;
+        if(map[Math.floor(state.enemy.y + my)*SIZE + Math.floor(state.enemy.x)] === 0) state.enemy.y += my;
+        if(d < 0.4) { state.running = false; document.getElementById('death').classList.remove('hidden'); }
+    }
+
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = '#010'; ctx.fillRect(0,0,w,h);
+    if(state.panic > 0.7 && Math.random() > 0.9) ctx.translate(Math.random()*4-2, 0);
+
+    state.zBuf = [];
+    for(let i=0; i<w; i++) {
+        let a = (state.p.dir - 0.5) + (i/w);
+        let rx = Math.sin(a), ry = Math.cos(a);
+        let d = 0;
+        while(d < 10) {
+            d += 0.05;
+            if(map[Math.floor(state.p.y + ry*d)*SIZE + Math.floor(state.p.x + rx*d)] === 1) break;
+        }
+        let realD = d * Math.cos(a - state.p.dir);
+        state.zBuf[i] = realD;
+        let wh = h / realD;
+        let lum = Math.max(0, 150 - d*25) * (state.flash ? 1 : 0.1);
+        ctx.fillStyle = `rgb(0,${lum},${lum*0.2})`;
+        ctx.fillRect(i, h/2 - wh/2, 1, wh);
+    }
+
+    const objs = [...state.notes.map(n => ({...n, t:'n'}))];
+    if(state.enemy.active) objs.push({...state.enemy, t:'e'});
+    objs.sort((a,b) => Math.sqrt((b.x-state.p.x)**2+(b.y-state.p.y)**2) - Math.sqrt((a.x-state.p.x)**2+(a.y-state.p.y)**2));
+
+    objs.forEach(obj => {
+        let dx = obj.x - state.p.x, dy = obj.y - state.p.y;
+        let d = Math.sqrt(dx*dx + dy*dy);
+        let a = Math.atan2(dx, dy) - state.p.dir;
+        if(a < -Math.PI) a += Math.PI*2; if(a > Math.PI) a -= Math.PI*2;
+        if(Math.abs(a) < 1) {
+            let s = h / d;
+            let x = (a / 1 + 0.5) * w;
+            if(state.zBuf[Math.floor(x)] > d) {
+                ctx.font = `${s/2}px serif`;
+                ctx.textAlign = "center";
+                ctx.fillText(obj.t === 'n' ? "📗" : "👹", x, h/2 + s/4);
+            }
+        }
+    });
+
+    ctx.setTransform(1,0,0,1,0,0);
+    requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
